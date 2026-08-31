@@ -1,0 +1,132 @@
+services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: helpflow
+      POSTGRES_USER: helpflow
+      POSTGRES_PASSWORD: helpflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpflow -d helpflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - helpflow_postgres:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: helpflow
+      RABBITMQ_DEFAULT_PASS: helpflow
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "${HELPFLOW_RABBITMQ_MANAGEMENT_PORT:-15682}:15672"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    environment: &helpflow-environment
+      HELPFLOW_DATABASE_URL: ${HELPFLOW_DATABASE_URL:-postgresql+psycopg://helpflow:helpflow@database:5432/helpflow}
+      HELPFLOW_RABBITMQ_URL: ${HELPFLOW_RABBITMQ_URL:-amqp://helpflow:helpflow@rabbitmq:5672/%2F}
+      HELPFLOW_JWT_SECRET: ${HELPFLOW_JWT_SECRET:-local-helpflow-secret-change-me-at-least-32-bytes}
+      HELPFLOW_ACCESS_TOKEN_EXPIRE_MINUTES: ${HELPFLOW_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      HELPFLOW_ADMIN_EMAIL: ${HELPFLOW_ADMIN_EMAIL:-admin@example.com}
+      HELPFLOW_ADMIN_PASSWORD: ${HELPFLOW_ADMIN_PASSWORD:-ChangeMe123!}
+      HELPFLOW_OPERATOR_EMAIL: ${HELPFLOW_OPERATOR_EMAIL:-operator@example.com}
+      HELPFLOW_OPERATOR_PASSWORD: ${HELPFLOW_OPERATOR_PASSWORD:-ChangeMe123!}
+      HELPFLOW_TELEGRAM_BOT_TOKEN: ${HELPFLOW_TELEGRAM_BOT_TOKEN:-}
+      HELPFLOW_TELEGRAM_WEBHOOK_SECRET: ${HELPFLOW_TELEGRAM_WEBHOOK_SECRET:-local-webhook-secret}
+      HELPFLOW_OPERATOR_TELEGRAM_CHAT_ID: ${HELPFLOW_OPERATOR_TELEGRAM_CHAT_ID:-}
+      HELPFLOW_LOG_LEVEL: ${HELPFLOW_LOG_LEVEL:-INFO}
+    depends_on:
+      database:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "${HELPFLOW_PORT:-8020}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  outbox-publisher:
+    build:
+      context: .
+      target: runtime
+    entrypoint: []
+    command: ["python", "-m", "helpflow.worker.publisher"]
+    environment: *helpflow-environment
+    depends_on:
+      api:
+        condition: service_healthy
+
+  notification-worker:
+    build:
+      context: .
+      target: runtime
+    entrypoint: []
+    command: ["python", "-m", "helpflow.worker.notification"]
+    environment: *helpflow-environment
+    depends_on:
+      api:
+        condition: service_healthy
+
+  database-test:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: helpflow_test
+      POSTGRES_USER: helpflow
+      POSTGRES_PASSWORD: helpflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpflow -d helpflow_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq-test:
+    image: rabbitmq:4-alpine
+    profiles: ["test"]
+    environment:
+      RABBITMQ_DEFAULT_USER: helpflow
+      RABBITMQ_DEFAULT_PASS: helpflow
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    environment:
+      HELPFLOW_DATABASE_URL: postgresql+psycopg://helpflow:helpflow@database-test:5432/helpflow_test
+      HELPFLOW_RABBITMQ_URL: amqp://helpflow:helpflow@rabbitmq-test:5672/%2F
+      HELPFLOW_JWT_SECRET: test-helpflow-secret-at-least-32-bytes-long
+      HELPFLOW_ADMIN_EMAIL: admin-test@example.com
+      HELPFLOW_ADMIN_PASSWORD: TestAdmin123!
+      HELPFLOW_OPERATOR_EMAIL: operator-test@example.com
+      HELPFLOW_OPERATOR_PASSWORD: TestOperator123!
+      HELPFLOW_TELEGRAM_WEBHOOK_SECRET: test-webhook-secret
+    depends_on:
+      database-test:
+        condition: service_healthy
+      rabbitmq-test:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && python -m helpflow.seed && pytest"]
+
+volumes:
+  helpflow_postgres:
