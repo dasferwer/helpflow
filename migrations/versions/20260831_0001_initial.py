@@ -1,4 +1,4 @@
-"""Create HelpFlow schema.
+"""Создаём таблицы обращений и уведомлений.
 
 Revision ID: 20260831_0001
 Revises:
