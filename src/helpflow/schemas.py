@@ -1,17 +1,24 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from helpflow.models import TicketPriority, TicketStatus, UserRole
 
 
 class UserCreate(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     email: EmailStr
     full_name: str = Field(min_length=2, max_length=120)
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Имя должно быть строкой")
+        return value.strip()
 
 
 class LoginRequest(BaseModel):
