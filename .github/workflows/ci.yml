@@ -1,0 +1,28 @@
+name: Проверки HelpFlow
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.17"
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: docker compose config --quiet
+      - run: docker compose --profile test build test
+      - run: docker compose --profile test run --rm test
+      - run: docker compose --profile test run --rm test python scripts/check_migration.py
+      - run: docker compose up --build -d --wait --wait-timeout 180 api outbox-publisher notification-worker
+      - run: curl --fail http://localhost:8020/health
+      - if: failure()
+        run: docker compose --profile test logs --tail=30
+      - if: always()
+        run: docker compose --profile test down -v

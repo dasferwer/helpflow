@@ -15,6 +15,8 @@ services:
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
+    volumes:
+      - helpflow_rabbitmq:/var/lib/rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: helpflow
       RABBITMQ_DEFAULT_PASS: helpflow
@@ -24,7 +26,7 @@ services:
       timeout: 5s
       retries: 30
     ports:
-      - "${HELPFLOW_RABBITMQ_MANAGEMENT_PORT:-15682}:15672"
+      - "127.0.0.1:${HELPFLOW_RABBITMQ_MANAGEMENT_PORT:-15682}:15672"
 
   api:
     build:
@@ -44,12 +46,12 @@ services:
       HELPFLOW_OPERATOR_TELEGRAM_CHAT_ID: ${HELPFLOW_OPERATOR_TELEGRAM_CHAT_ID:-}
       HELPFLOW_LOG_LEVEL: ${HELPFLOW_LOG_LEVEL:-INFO}
     depends_on:
-      database:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     ports:
-      - "${HELPFLOW_PORT:-8020}:8000"
+      - "127.0.0.1:${HELPFLOW_PORT:-8020}:8000"
     healthcheck:
       test:
         - CMD
@@ -59,6 +61,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    environment: *helpflow-environment
+    command: ["sh", "-c", "alembic upgrade head && python -m helpflow.seed"]
+    depends_on:
+      database:
+        condition: service_healthy
 
   outbox-publisher:
     build:
@@ -130,3 +142,4 @@ services:
 
 volumes:
   helpflow_postgres:
+  helpflow_rabbitmq:

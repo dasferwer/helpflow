@@ -3,7 +3,6 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import Select, func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from helpflow.config import get_settings
@@ -38,13 +37,21 @@ def _event_payload(ticket: Ticket) -> dict[str, object]:
         "ticket_number": ticket.number,
         "subject": ticket.subject,
         "status": str(ticket.status),
-        "client_chat_id": ticket.client.telegram_chat_id,
+        "client_id": str(ticket.client_id),
+        "version": ticket.version,
+        "client_chat_id": (
+            ticket.client.telegram_chat_id if ticket.client.telegram_verified_at else None
+        ),
         "operator_chat_id": settings.operator_telegram_chat_id or None,
     }
 
 
-def add_outbox_event(db: Session, event_type: str, ticket: Ticket) -> None:
-    db.add(OutboxEvent(event_type=event_type, payload=_event_payload(ticket)))
+def add_outbox_event(
+    db: Session, event_type: str, ticket: Ticket, *, internal: bool = False
+) -> None:
+    payload = _event_payload(ticket)
+    payload["internal"] = internal
+    db.add(OutboxEvent(event_type=event_type, payload=payload))
 
 
 def add_history(
@@ -84,7 +91,9 @@ def ensure_ticket_access(ticket: Ticket, user: User) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
 
 
-def create_ticket(db: Session, payload: TicketCreate, client: User) -> Ticket:
+def create_ticket(
+    db: Session, payload: TicketCreate, client: User, *, commit: bool = True
+) -> Ticket:
     ticket = Ticket(
         subject=payload.subject.strip(),
         description=payload.description.strip(),
@@ -97,8 +106,9 @@ def create_ticket(db: Session, payload: TicketCreate, client: User) -> Ticket:
     ticket.client = client
     add_history(db, ticket=ticket, actor=client, action="ticket.created")
     add_outbox_event(db, "ticket.created", ticket)
-    db.commit()
-    db.refresh(ticket)
+    if commit:
+        db.commit()
+        db.refresh(ticket)
     return ticket
 
 
@@ -126,7 +136,20 @@ def list_tickets(
     return items, db.scalar(count_query) or 0
 
 
-def assign_ticket(db: Session, ticket: Ticket, assignee: User, actor: User) -> Ticket:
+def lock_ticket(db: Session, ticket: Ticket, actor: User, version: int | None = None) -> None:
+    ensure_ticket_access(ticket, actor)
+    db.refresh(ticket, with_for_update=True)
+    if version is not None and ticket.version != version:
+        raise HTTPException(
+            status_code=409, detail="Заявка уже изменена; получите актуальную версию"
+        )
+
+
+def assign_ticket(db: Session, ticket: Ticket, assignee: User, actor: User, version: int) -> Ticket:
+    lock_ticket(db, ticket, actor, version)
+    if ticket.status in {TicketStatus.RESOLVED, TicketStatus.CLOSED}:
+        raise HTTPException(status_code=409, detail="Сначала возобновите работу над заявкой")
+    ticket.version += 1
     if assignee.role not in STAFF_ROLES or not assignee.is_active:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -157,8 +180,9 @@ def transition_ticket(
     target: TicketStatus,
     actor: User,
     reason: str | None,
+    version: int,
 ) -> Ticket:
-    ensure_ticket_access(ticket, actor)
+    lock_ticket(db, ticket, actor, version)
     current = TicketStatus(ticket.status)
     transitions = STAFF_TRANSITIONS if actor.role in STAFF_ROLES else CLIENT_TRANSITIONS
     if target not in transitions.get(current, set()):
@@ -166,8 +190,12 @@ def transition_ticket(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Transition from {current} to {target} is not allowed for this role",
         )
+    ticket.version += 1
     ticket.status = target
-    ticket.resolved_at = datetime.now(UTC) if target == TicketStatus.RESOLVED else None
+    if target == TicketStatus.RESOLVED:
+        ticket.resolved_at = datetime.now(UTC)
+    elif target != TicketStatus.CLOSED:
+        ticket.resolved_at = None
     add_history(
         db,
         ticket=ticket,
@@ -184,7 +212,7 @@ def transition_ticket(
 
 
 def add_comment(db: Session, ticket: Ticket, payload: CommentCreate, author: User) -> Comment:
-    ensure_ticket_access(ticket, author)
+    lock_ticket(db, ticket, author)
     if payload.is_internal and author.role not in STAFF_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -205,21 +233,7 @@ def add_comment(db: Session, ticket: Ticket, payload: CommentCreate, author: Use
         action="ticket.comment_added",
         details={"comment_id": str(comment.id), "internal": payload.is_internal},
     )
-    add_outbox_event(db, "ticket.comment_added", ticket)
+    add_outbox_event(db, "ticket.comment_added", ticket, internal=payload.is_internal)
     db.commit()
     db.refresh(comment)
     return comment
-
-
-def link_telegram_chat(db: Session, user: User, chat_id: str) -> User:
-    user.telegram_chat_id = chat_id
-    try:
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Telegram chat is already linked to another user",
-        ) from exc
-    db.refresh(user)
-    return user

@@ -46,6 +46,10 @@ class TicketStatus(StrEnum):
 
 
 class DeliveryStatus(StrEnum):
+    PENDING = "pending"
+    SENDING = "sending"
+    RETRY = "retry"
+    DEAD = "dead"
     SENT = "sent"
     SKIPPED = "skipped"
     FAILED = "failed"
@@ -83,6 +87,7 @@ class User(UUIDMixin, TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(String(20), default=UserRole.CLIENT, nullable=False)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64))
+    telegram_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -101,6 +106,8 @@ class Ticket(UUIDMixin, TimestampMixin, Base):
         Index("ix_tickets_client_created", "client_id", "created_at"),
         Index("ix_tickets_assignee_status", "assignee_id", "status"),
     )
+
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     number: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
     subject: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -189,10 +196,11 @@ class NotificationDelivery(UUIDMixin, Base):
     __tablename__ = "notification_deliveries"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('sent', 'skipped', 'failed')",
+            "status IN ('pending', 'sending', 'retry', 'dead', 'sent', 'skipped', 'failed')",
             name="ck_deliveries_valid_status",
         ),
-        UniqueConstraint("event_id", name="notification_deliveries_event_id_key"),
+        UniqueConstraint("event_id", "recipient", name="uq_delivery_recipient"),
+        Index("ix_delivery_due", "status", "next_attempt_at"),
     )
 
     event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
@@ -201,6 +209,42 @@ class NotificationDelivery(UUIDMixin, Base):
     recipient: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[DeliveryStatus] = mapped_column(String(20), nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="{}", nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+
+
+class TelegramLink(Base):
+    __tablename__ = "telegram_links"
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TelegramReceipt(Base):
+    __tablename__ = "telegram_receipts"
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    response: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class DeliveryReplay(UUIDMixin, Base):
+    __tablename__ = "delivery_replays"
+    delivery_id: Mapped[UUID] = mapped_column(
+        ForeignKey("notification_deliveries.id"), nullable=False
+    )
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

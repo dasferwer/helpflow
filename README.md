@@ -1,127 +1,149 @@
 # HelpFlow
 
-Backend-система технической поддержки с управляемым жизненным циклом заявок,
-Telegram webhook, transactional outbox и асинхронными уведомлениями через
-RabbitMQ.
+Сервис технической поддержки на FastAPI, PostgreSQL и RabbitMQ: заявки,
+назначение операторов, история, комментарии и уведомления в Telegram.
+Изменение заявки и событие outbox фиксируются одной транзакцией; доставка
+каждому получателю имеет собственное состояние и ограниченное число попыток.
 
 ## История проекта
 
-- первоначальная разработка: ноябрь 2023 — июль 2024 года (период указан
-  приблизительно);
-- подготовка и публикация портфолио-версии: август 2026 года.
+- Первоначальная разработка: ноябрь 2023 — июль 2024 года, приблизительно.
+- Подготовка портфолио-версии: август 2026 года.
+- Доработка доставки, конкурентных изменений и Telegram-привязки: сентябрь 2026 года.
 
-Репозиторий содержит актуализированную и документированную версию проекта,
-подготовленную для публичного портфолио.
+Репозиторий демонстрирует инженерные решения и воспроизводимые проверки.
+Реальная нагрузка и production-эксплуатация не заявляются.
 
 ## Возможности
 
-- регистрация и JWT-аутентификация;
-- роли `client`, `operator` и `admin`;
-- создание, назначение, фильтрация и просмотр заявок;
-- контролируемые переходы между статусами;
-- публичные и внутренние комментарии;
-- полная история изменений заявки;
-- привязка Telegram chat ID;
-- создание заявки командой `/new Тема | Описание`;
-- transactional outbox без потери события при сбое RabbitMQ;
-- отдельные publisher и notification worker;
-- идемпотентная регистрация доставки уведомлений;
-- healthcheck PostgreSQL и RabbitMQ;
-- OpenAPI, миграции, seed и интеграционные тесты.
+- JWT-аутентификация, роли `client`, `operator`, `admin`, пароли на scrypt.
+- Создание заявок, назначение, фильтры и переходы между статусами.
+- Проверка версии при назначении и смене статуса; атомарные история и outbox.
+- Внутренние комментарии скрыты от клиента вместе с их записями истории.
+- Привязка Telegram через одноразовый код в личном чате; защита от повторов webhook.
+- PostgreSQL outbox, publisher confirms RabbitMQ, очередь некорректных событий.
+- Доставки по получателям, задержка повторов, учёт `retry_after`, восстановление
+  задач после падения worker и защита от запоздалого сохранения результата.
+- Список окончательно неудачных доставок и повтор администратором с аудитом.
+- Миграции, отдельные тестовые PostgreSQL и RabbitMQ, CI и healthcheck.
 
-## Жизненный цикл заявки
+## Запуск
 
-```mermaid
-stateDiagram-v2
-    [*] --> new
-    new --> in_progress: operator assigns
-    in_progress --> waiting_customer: operator requests information
-    waiting_customer --> in_progress: work resumed
-    in_progress --> resolved: operator resolves
-    waiting_customer --> resolved: operator resolves
-    resolved --> in_progress: client or staff reopens
-    resolved --> closed: client or staff closes
-    closed --> [*]
-```
-
-Недопустимый переход возвращает `409 Conflict`. Клиент видит только свои
-заявки и не получает внутренние комментарии.
-
-## Архитектура
-
-```mermaid
-flowchart LR
-    Client[REST / Telegram]
-    API[FastAPI]
-    DB[(PostgreSQL)]
-    Outbox[Outbox publisher]
-    MQ[(RabbitMQ)]
-    Worker[Notification worker]
-    Telegram[Telegram Bot API]
-
-    Client --> API
-    API --> DB
-    DB --> Outbox
-    Outbox --> MQ
-    MQ --> Worker
-    Worker --> DB
-    Worker -. configured token .-> Telegram
-```
-
-API сохраняет заявку, историю и outbox-событие в одной транзакции. Publisher
-отправляет неопубликованные события в RabbitMQ, а consumer записывает результат
-доставки. Если Telegram token не задан, доставка получает статус `skipped`, но
-полный event-driven сценарий остаётся наблюдаемым локально.
-
-## Быстрый запуск
+Нужны Docker и Docker Compose. Для локальных статических проверок — Python 3.12+ и uv.
 
 ```bash
-docker compose up --build --detach
+docker compose up --build -d --wait api outbox-publisher notification-worker
 ```
 
-После запуска:
+Сервис `migrate` применяет Alembic и создаёт демонстрационные учётные записи;
+API и workers запускаются после подготовки схемы. Runtime работает под UID 10001.
+PostgreSQL и RabbitMQ имеют отдельные постоянные тома.
 
-- Swagger UI: <http://localhost:8020/docs>;
-- healthcheck: <http://localhost:8020/health>;
-- RabbitMQ Management: <http://localhost:15682>.
+- Swagger UI: <http://localhost:8020/docs>
+- Healthcheck БД и брокера: <http://localhost:8020/health>
+- RabbitMQ Management: <http://localhost:15682>, локальные реквизиты `helpflow` / `helpflow`.
 
-Демонстрационные учётные записи:
+Порты привязаны к `127.0.0.1`. Демонстрационные пользователи:
+`admin@example.com` и `operator@example.com`, пароль обоих — `ChangeMe123!`.
+Seed создаёт отсутствующих пользователей и не меняет пароль, роль или активность
+существующих. Публичные демонстрационные секреты не предназначены для внешнего размещения.
 
-```text
-admin@example.com / ChangeMe123!
-operator@example.com / ChangeMe123!
-```
-
-Для внешнего окружения скопируйте `.env.example` в `.env`, замените секреты и
-при необходимости задайте `HELPFLOW_TELEGRAM_BOT_TOKEN` и
-`HELPFLOW_OPERATOR_TELEGRAM_CHAT_ID`.
-
-## Тесты и проверки
+Параметры перечислены в [.env.example](.env.example): подключения PostgreSQL
+и RabbitMQ, JWT, учётные записи, секрет webhook, токен бота и доверенный чат операторов.
+Без токена бота приложение работает, но отправка назначенному получателю завершается
+повторами и затем `dead`. Если получатель не настроен, доставка получает `skipped`.
 
 ```bash
-docker compose --profile test up --build \
-  --abort-on-container-exit --exit-code-from test test
-docker compose rm --stop --force --volumes test database-test rabbitmq-test
+docker compose down
 ```
 
+Остановка сохраняет тома. `down -v` удаляет данные PostgreSQL и RabbitMQ этого стенда.
+
+## Заявки и версии
+
+После `POST /api/v1/auth/register` получите токен через `POST /api/v1/auth/login`.
+Передавайте `Authorization: Bearer …`. Основные маршруты:
+
+- `POST /api/v1/tickets` — создать заявку с темой, описанием и приоритетом.
+- `GET /api/v1/tickets` — список с фильтрами и пагинацией.
+- `GET /api/v1/tickets/{id}` — заявка, комментарии и доступная пользователю история.
+- `POST /api/v1/tickets/{id}/assign` — `assignee_id` и текущая `version`.
+- `POST /api/v1/tickets/{id}/transition` — целевой `status`, текущая `version`, необязательный `reason`.
+- `POST /api/v1/tickets/{id}/comments` — текст `body` и признак `is_internal`.
+
+Статусы: `new → in_progress ↔ waiting_customer → resolved → closed`.
+Из `resolved` клиент или сотрудник могут вернуться в `in_progress`.
+Закрытая заявка не возобновляется. Перед назначением решённой заявки её нужно возобновить.
+Время решения сохраняется при закрытии и очищается при возобновлении.
+
+Назначение и переход увеличивают версию; устаревшая версия возвращает `409`.
+Комментарии не меняют версию состояния. Обычное создание заявки через HTTP пока
+не поддерживает ключ идемпотентности; защита от повторов реализована для Telegram webhook.
+
+## Telegram
+
+1. Авторизованный пользователь вызывает `POST /api/v1/users/me/telegram/link-token`.
+2. Полученный `token` отправляет своему боту в личном чате: `/start TOKEN`.
+3. Бот передаёт update на `/api/v1/integrations/telegram/webhook` с заголовком
+   `X-Telegram-Bot-Api-Secret-Token`, равным `HELPFLOW_TELEGRAM_WEBHOOK_SECRET`.
+4. После подтверждения команда `/new Тема | Описание` создаёт заявку.
+
+Код действует десять минут, используется один раз и хранится в БД только в виде
+SHA-256. Новый код отменяет предыдущий. Групповые чаты для привязки не принимаются.
+Старый маршрут прямой записи `chat_id` удалён. Существующие привязки после миграции
+сохраняются, но требуют подтверждения перед созданием заявок и отправкой уведомлений.
+
+Сохраняются `update_id`, отпечаток запроса и ответ. Одинаковый повтор получает
+исходный ответ; другой запрос с тем же идентификатором — `409`. Создание заявки
+и фиксация ответа webhook входят в одну транзакцию. Некорректная команда даёт
+`accepted: false`, без создания заявки.
+
+Для регистрации webhook во внешнем Telegram требуется HTTPS-адрес и настройка
+`setWebhook` с `secret_token`. Локальный стенд не регистрирует webhook автоматически.
+Контракт сверяется с [официальным Telegram Bot API](https://core.telegram.org/bots/api).
+Реальные сообщения при проверках проекта не отправляются.
+
+## Доставка и восстановление
+
+Worker сначала сохраняет задания для всех получателей в PostgreSQL и затем
+подтверждает сообщение RabbitMQ. Повтор события не создаёт новые задания.
+Отправка идёт вне транзакции, после фиксации права на выполнение задачи на 60 секунд.
+Просроченную задачу может забрать другой worker; старый результат не перезапишет новый.
+
+Временные ошибки повторяются до шести попыток с экспоненциальной задержкой
+и небольшим случайным разбросом. `retry_after` Telegram учитывается отдельно,
+с верхней границей одни сутки. Ответы `400`, `403`, `404` считаются постоянными ошибками.
+Тело ошибки Telegram и токен бота не сохраняются в диагностике.
+
+Окончательные ошибки находятся в таблице `notification_deliveries` со статусом `dead`:
+
+- `GET /api/v1/notifications/dead` — список, только для администратора.
+- `POST /api/v1/notifications/{id}/retry` с `{"reason":"Причина повтора"}` —
+  новый цикл попыток после устранения причины; действие пишется в `delivery_replays`.
+
+Некорректные сообщения брокера попадают в `helpflow.notifications.invalid`.
+Автоматического повторного запуска карантина нет: сначала нужно разобраться
+с форматом события. Исторические записи `failed` видны администратору, но не
+переотправляются: старая схема не сохраняла достаточно данных для безопасного повтора.
+
+Внешняя отправка имеет семантику **at-least-once**: при успехе Telegram и падении
+до фиксации результата возможен дубль. Telegram `sendMessage` не принимает ключ
+идемпотентности; локальная дедупликация не устраняет это окно.
+В уведомлении только номер заявки и тип события, без темы и текста комментариев.
+
+## Проверки
+
 ```bash
-uv sync --extra dev
+uv sync --frozen --extra dev
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy src
+
+docker compose --profile test build test
+docker compose --profile test run --rm test
+docker compose --profile test run --rm test python scripts/check_migration.py
 ```
 
-## Стек
-
-Python 3.12, FastAPI, Pydantic, SQLAlchemy 2, PostgreSQL 17, RabbitMQ, Pika,
-JWT/RBAC, Telegram Bot API, Alembic, Docker Compose, pytest, HTTPX2, Ruff и mypy.
-
-Подробные решения и сценарии отказа: [`docs/architecture.md`](./docs/architecture.md).
-
-## English summary
-
-HelpFlow is a containerized support-ticket backend. It provides JWT/RBAC,
-ticket assignment and state transitions, public/internal comments, Telegram
-webhook ingestion and asynchronous notifications. A transactional outbox keeps
-database writes and RabbitMQ publication consistent, while the notification
-consumer records idempotent delivery outcomes.
+Тесты очищают только `helpflow_test`. Проверка миграции создаёт отдельную временную БД,
+заполняет старую схему и проверяет сохранность данных после обновления.
+[Результаты](docs/verification.md), [архитектура и ограничения](docs/architecture.md).

@@ -20,7 +20,7 @@ def test_ticket_visibility_assignment_and_workflow(
     invalid_transition = client.post(
         f"/api/v1/tickets/{ticket['id']}/transition",
         headers=owner["headers"],
-        json={"status": "closed"},
+        json={"status": "closed", "version": 1},
     )
     assert invalid_transition.status_code == 409
 
@@ -29,7 +29,7 @@ def test_ticket_visibility_assignment_and_workflow(
     assigned = client.post(
         f"/api/v1/tickets/{ticket['id']}/assign",
         headers=operator_headers,
-        json={"assignee_id": operator["id"]},
+        json={"assignee_id": operator["id"], "version": 1},
     )
     assert assigned.status_code == 200
     assert assigned.json()["status"] == "in_progress"
@@ -37,7 +37,7 @@ def test_ticket_visibility_assignment_and_workflow(
     resolved = client.post(
         f"/api/v1/tickets/{ticket['id']}/transition",
         headers=operator_headers,
-        json={"status": "resolved", "reason": "Access restored"},
+        json={"status": "resolved", "reason": "Access restored", "version": 2},
     )
     assert resolved.status_code == 200
     assert resolved.json()["resolved_at"] is not None
@@ -45,7 +45,7 @@ def test_ticket_visibility_assignment_and_workflow(
     closed = client.post(
         f"/api/v1/tickets/{ticket['id']}/transition",
         headers=owner["headers"],
-        json={"status": "closed"},
+        json={"status": "closed", "version": 3},
     )
     assert closed.status_code == 200
     assert closed.json()["status"] == "closed"

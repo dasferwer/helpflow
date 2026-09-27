@@ -1,22 +1,32 @@
 import hmac
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from helpflow.broker import check_connection
 from helpflow.config import get_settings
 from helpflow.dependencies import CurrentUser, DbSession, StaffUser
-from helpflow.models import Comment, Ticket, TicketStatus, User, UserRole
+from helpflow.models import (
+    Comment,
+    DeliveryReplay,
+    DeliveryStatus,
+    NotificationDelivery,
+    Ticket,
+    TicketStatus,
+    User,
+    UserRole,
+)
 from helpflow.schemas import (
     AssignTicketRequest,
     CommentCreate,
     CommentRead,
     LoginRequest,
-    TelegramLinkRequest,
+    TelegramLinkResponse,
     TelegramUpdate,
     TelegramWebhookResponse,
     TicketCreate,
@@ -35,10 +45,10 @@ from helpflow.services import (
     create_ticket,
     ensure_ticket_access,
     get_ticket,
-    link_telegram_chat,
     list_tickets,
     transition_ticket,
 )
+from helpflow.telegram import handle_update, issue_link
 
 router = APIRouter()
 
@@ -104,13 +114,11 @@ def read_me(current_user: CurrentUser) -> User:
     return current_user
 
 
-@router.put("/api/v1/users/me/telegram", response_model=UserRead, tags=["users"])
-def link_telegram(
-    payload: TelegramLinkRequest,
-    db: DbSession,
-    current_user: CurrentUser,
-) -> User:
-    return link_telegram_chat(db, current_user, payload.chat_id)
+@router.post(
+    "/api/v1/users/me/telegram/link-token", response_model=TelegramLinkResponse, tags=["users"]
+)
+def link_telegram(db: DbSession, current_user: CurrentUser) -> TelegramLinkResponse:
+    return issue_link(db, current_user)
 
 
 @router.get("/api/v1/users/staff", response_model=list[UserRead], tags=["users"])
@@ -160,12 +168,14 @@ def read_tickets(
 
 
 @router.get("/api/v1/tickets/{ticket_id}", response_model=TicketDetail, tags=["tickets"])
-def read_ticket(ticket_id: UUID, db: DbSession, current_user: CurrentUser) -> Ticket:
+def read_ticket(ticket_id: UUID, db: DbSession, current_user: CurrentUser) -> TicketDetail:
     ticket = get_ticket(db, ticket_id, with_details=True)
     ensure_ticket_access(ticket, current_user)
+    result = TicketDetail.model_validate(ticket)
     if current_user.role == UserRole.CLIENT:
-        ticket.comments = [comment for comment in ticket.comments if not comment.is_internal]
-    return ticket
+        result.comments = [comment for comment in result.comments if not comment.is_internal]
+        result.history = [event for event in result.history if not event.details.get("internal")]
+    return result
 
 
 @router.post(
@@ -183,7 +193,7 @@ def assign(
     assignee = db.get(User, payload.assignee_id)
     if assignee is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignee not found")
-    return assign_ticket(db, ticket, assignee, staff)
+    return assign_ticket(db, ticket, assignee, staff, payload.version)
 
 
 @router.post(
@@ -203,6 +213,7 @@ def transition(
         payload.status,
         current_user,
         payload.reason,
+        payload.version,
     )
 
 
@@ -236,22 +247,56 @@ def telegram_webhook(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret"
         )
-    if payload.message is None or payload.message.text is None:
-        return TelegramWebhookResponse(accepted=False, reason="Message text is missing")
-    chat_id = str(payload.message.chat.id)
-    user = db.scalar(select(User).where(User.telegram_chat_id == chat_id, User.is_active.is_(True)))
-    if user is None:
-        return TelegramWebhookResponse(accepted=False, reason="Telegram chat is not linked")
-    text_value = payload.message.text.strip()
-    if not text_value.startswith("/new ") or "|" not in text_value:
-        return TelegramWebhookResponse(
-            accepted=False,
-            reason="Use /new Subject | Description",
-        )
-    subject, description = (part.strip() for part in text_value[5:].split("|", maxsplit=1))
-    ticket = create_ticket(
-        db,
-        TicketCreate(subject=subject, description=description),
-        user,
+    return handle_update(db, payload)
+
+
+class ReplayRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    reason: str = Field(min_length=5, max_length=500)
+
+
+@router.get("/api/v1/notifications/dead", tags=["notifications"])
+def dead_notifications(
+    db: DbSession, staff: StaffUser, limit: Annotated[int, Query(ge=1, le=100)] = 50
+) -> list[dict[str, object]]:
+    if staff.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Нужны права администратора")
+    jobs = db.scalars(
+        select(NotificationDelivery)
+        .where(NotificationDelivery.status.in_(["dead", "failed"]))
+        .order_by(NotificationDelivery.created_at, NotificationDelivery.id)
+        .limit(limit)
     )
-    return TelegramWebhookResponse(accepted=True, ticket_number=ticket.number)
+    return [
+        {
+            "id": job.id,
+            "event_id": job.event_id,
+            "status": job.status,
+            "attempts": job.attempts,
+            "error": job.error,
+        }
+        for job in jobs
+    ]
+
+
+@router.post("/api/v1/notifications/{delivery_id}/retry", tags=["notifications"])
+def retry_notification(
+    delivery_id: UUID, payload: ReplayRequest, db: DbSession, staff: StaffUser
+) -> dict[str, str]:
+    if staff.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Нужны права администратора")
+    job = db.scalar(
+        select(NotificationDelivery).where(NotificationDelivery.id == delivery_id).with_for_update()
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Доставка не найдена")
+    if job.status != DeliveryStatus.DEAD or not job.payload:
+        raise HTTPException(
+            status_code=409, detail="Повтор разрешён только для новых доставок в состоянии dead"
+        )
+    job.status, job.attempts, job.error = DeliveryStatus.RETRY, 0, None
+    job.next_attempt_at = datetime.now(UTC)
+    db.add(DeliveryReplay(delivery_id=job.id, actor_id=staff.id, reason=payload.reason.strip()))
+    db.commit()
+    return {"status": "retry"}

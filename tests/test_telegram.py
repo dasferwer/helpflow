@@ -13,12 +13,20 @@ def test_linked_telegram_chat_can_create_ticket(
     register_client: Callable[[], dict[str, Any]],
 ) -> None:
     account = register_client()
-    link = client.put(
-        "/api/v1/users/me/telegram",
-        headers=account["headers"],
-        json={"chat_id": "200002"},
-    )
+    link = client.post("/api/v1/users/me/telegram/link-token", headers=account["headers"])
     assert link.status_code == 200
+    confirmed = client.post(
+        "/api/v1/integrations/telegram/webhook",
+        headers={"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"},
+        json={
+            "update_id": 41,
+            "message": {
+                "chat": {"id": 200002, "type": "private"},
+                "text": "/start " + link.json()["token"],
+            },
+        },
+    )
+    assert confirmed.json()["accepted"]
 
     response = client.post(
         "/api/v1/integrations/telegram/webhook",
@@ -26,7 +34,7 @@ def test_linked_telegram_chat_can_create_ticket(
         json={
             "update_id": 42,
             "message": {
-                "chat": {"id": 200002},
+                "chat": {"id": 200002, "type": "private"},
                 "text": "/new Printer failure | The office printer does not respond at all",
             },
         },

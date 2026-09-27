@@ -1,45 +1,99 @@
-# HelpFlow architecture decisions
+# Архитектура HelpFlow
 
-## Transactional outbox
+## Границы транзакций
 
-Publishing to RabbitMQ directly inside an HTTP request creates a dual-write
-problem: the database transaction may commit while message publication fails,
-or the message may be published before the transaction rolls back.
+HTTP-слой проверяет аутентификацию и схемы. Сервисы меняют заявки,
+историю и outbox одной транзакцией. Для назначения и перехода строка заявки
+блокируется и перечитывается; версия сравнивается после блокировки.
+Конкурентные действия одной версии дают один успех и один конфликт.
 
-HelpFlow writes the domain change and `outbox_events` row in one PostgreSQL
-transaction. A separate publisher locks pending rows with `FOR UPDATE SKIP
-LOCKED`, publishes persistent RabbitMQ messages and sets `published_at` only
-after publisher confirmation.
+Publisher читает outbox через `FOR UPDATE SKIP LOCKED`, публикует сообщения
+с `mandatory` и publisher confirms, затем фиксирует `published_at`.
+Падение после подтверждения брокера может привести к повторной публикации.
+Неопубликованные записи остаются в БД и подбираются после восстановления.
+Счётчик `OutboxEvent.attempts` отражает подтверждённые публикации, а не все сетевые попытки.
+Транзакция publisher удерживается на время публикации пакета до 50 событий;
+для больших потоков потребуется отдельная модель аренды пакетов.
 
-## Consumer idempotency
+## Inbox и доставка
 
-RabbitMQ uses at-least-once delivery. The consumer stores the event UUID in
-`notification_deliveries`, where a unique constraint prevents duplicate side
-effects after redelivery. Failed Telegram requests are recorded instead of
-silently acknowledged.
+Notification worker принимает только событие, найденное по ID в локальном outbox;
+содержимое для отправки берёт из БД. В одной транзакции создаётся набор доставок.
+Транзакционная advisory-блокировка по событию защищает от конкурентного приёма дублей,
+уникальное ограничение — от повторной записи пары события и получателя.
+Старые агрегированные записи доставок тоже подавляют повтор события.
 
-## Telegram boundary
+После фиксации заданий worker подтверждает сообщение RabbitMQ. Задания остаются
+доступными для выполнения и без сообщения в очереди. Повторы планируются в БД:
+`pending → sending → sent`, при временной ошибке — `retry`, при постоянной ошибке
+или исчерпании попыток — `dead`. Отсутствие получателя даёт `skipped`.
 
-Incoming webhook calls require `X-Telegram-Bot-Api-Secret-Token`. A chat must be
-linked to an active HelpFlow account before it can create a ticket. The demo
-command is:
+Право на выполнение фиксируется отдельной короткой транзакцией через
+`SKIP LOCKED`, срок действия и случайный `lease_token`. HTTP-вызов Telegram
+выполняется после завершения транзакции. Результат сохраняется только при совпадении
+токена. Это защищает запись в БД от старого worker, но не отменяет уже отправленный
+внешний запрос: после потери ответа возможен дубль сообщения.
 
-```text
-/new Subject | Detailed description
+Проверяется актуальная привязка клиента и его активность перед отправкой.
+Изменение привязки непосредственно во время сетевого вызова всё ещё возможно;
+поэтому уведомление не содержит текста заявки. Внутренние комментарии направляются
+только в доверенный чат операторов, заданный конфигурацией.
+
+Некорректное сообщение сначала публикуется в карантинную очередь с подтверждением,
+и только затем подтверждается исходная доставка. Ошибка БД не считается ошибкой
+формата: соединение закрывается, неподтверждённое сообщение возвращается брокеру.
+
+## Telegram и конфиденциальность
+
+Прямая запись `chat_id` заменена выдачей одноразового кода по JWT.
+Webhook защищён общим секретом Telegram; привязка разрешена только в личном чате.
+Код связан с пользователем, действует десять минут и хранится в виде хеша.
+Для выпуска и погашения кода сначала блокируется пользователь, затем запись кода.
+Повтор webhook сериализуется по `update_id`; ответ сохраняется вместе с изменением.
+
+При чтении заявки формируется отдельная схема ответа: ORM-коллекции не меняются
+ради фильтрации. Клиент не получает внутренние комментарии и их события истории.
+Seed не сбрасывает пароль или блокировку существующего пользователя при перезапуске.
+JWT требует `sub`, `iat`, `exp`; права и активность берутся из текущей записи пользователя.
+
+## Обновление и эксплуатация
+
+Остановите API и workers, сделайте резервную копию PostgreSQL, примените Alembic
+и запустите новую версию. Смешанный запуск старого и нового worker не поддерживается.
+Миграция сохраняет исторические заявки, события и доставки, добавляет версии и
+таблицы подтверждений. Старые Telegram-привязки требуют повторного подтверждения.
+
+Автоматический downgrade запрещён: старая схема допускает только одну доставку
+на событие и не может сохранить новые записи по получателям. Используйте исправляющую
+миграцию; восстановление резервной копии допустимо только с учётом новых записей.
+Проверка миграции работает в отдельной временной тестовой БД.
+
+`/health` проверяет PostgreSQL и RabbitMQ. HTTP-запросы журналируются с серверным
+`X-Request-ID`, шаблоном маршрута, кодом ответа и временем; без тел, query-параметров
+и токенов. Worker пишет ID доставки, номер попытки, состояние и результат проверки
+права на сохранение. Ошибки зависимостей в API дают `503` и `Retry-After: 1`.
+
+Ожидание блокировки БД ограничено тремя секундами, SQL-запроса — десятью,
+соединения из пула и подключения — пятью. RabbitMQ и Telegram имеют сетевые тайм-ауты.
+Для диагностики очереди доставок:
+
+```sql
+SELECT status, count(*), min(next_attempt_at)
+FROM notification_deliveries
+GROUP BY status;
+
+SELECT count(*), min(created_at)
+FROM outbox_events WHERE published_at IS NULL;
 ```
 
-The bot token is optional locally. No real message is sent without an explicit
-token in environment variables.
+## Ограничения
 
-## Failure scenarios
+Нет замеров пропускной способности, проверки восстановления резервной копии,
+HA-кластера RabbitMQ, строгого порядка внешних уведомлений, квот API и очистки
+outbox, аудита, webhook receipts и истории повторов. Перезапуск процессов
+после завершения контейнера требует настройки окружения. Бесконечного накопления
+данных следует избегать отдельной политикой хранения с учётом дедупликации.
 
-| Failure | Behaviour |
-|---|---|
-| PostgreSQL unavailable | API healthcheck fails and no request is accepted |
-| RabbitMQ unavailable | API healthcheck reports failure; committed outbox rows remain pending |
-| Publisher crashes | Unpublished rows are retried after restart |
-| Consumer receives an event twice | Unique event ID prevents duplicate delivery records |
-| Telegram token missing | Delivery is recorded as `skipped` |
-| Telegram request fails | Delivery is recorded as `failed` with a bounded error message |
-| Invalid ticket transition | API returns `409 Conflict` |
-| Client requests another user's ticket | API returns `404` to avoid leaking identifiers |
+Живой Telegram проверяется отдельно с собственным ботом и HTTPS webhook.
+Интеграционные тесты используют настоящий RabbitMQ и PostgreSQL, а Telegram —
+контролируемый транспорт. Это не подтверждение доставки через внешнюю сеть.

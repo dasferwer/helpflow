@@ -7,6 +7,8 @@ from helpflow.models import TicketPriority, TicketStatus, UserRole
 
 
 class UserCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
     email: EmailStr
     full_name: str = Field(min_length=2, max_length=120)
     password: str = Field(min_length=8, max_length=128)
@@ -34,11 +36,14 @@ class UserRead(BaseModel):
     created_at: datetime
 
 
-class TelegramLinkRequest(BaseModel):
-    chat_id: str = Field(min_length=1, max_length=64)
+class TelegramLinkResponse(BaseModel):
+    token: str
+    expires_at: datetime
 
 
 class TicketCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
     subject: str = Field(min_length=5, max_length=200)
     description: str = Field(min_length=10, max_length=5000)
     priority: TicketPriority = TicketPriority.NORMAL
@@ -48,6 +53,7 @@ class TicketRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    version: int
     number: int
     subject: str
     description: str
@@ -61,6 +67,8 @@ class TicketRead(BaseModel):
 
 
 class CommentCreate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
     body: str = Field(min_length=1, max_length=4000)
     is_internal: bool = False
 
@@ -101,16 +109,19 @@ class TicketList(BaseModel):
 
 
 class AssignTicketRequest(BaseModel):
+    version: int = Field(ge=1)
     assignee_id: UUID
 
 
 class TransitionRequest(BaseModel):
+    version: int = Field(ge=1)
     status: TicketStatus
     reason: str | None = Field(default=None, max_length=500)
 
 
 class TelegramChat(BaseModel):
-    id: int | str
+    id: int
+    type: str
 
 
 class TelegramMessage(BaseModel):
@@ -119,7 +130,7 @@ class TelegramMessage(BaseModel):
 
 
 class TelegramUpdate(BaseModel):
-    update_id: int
+    update_id: int = Field(ge=0)
     message: TelegramMessage | None = None
 
 

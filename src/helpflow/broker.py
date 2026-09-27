@@ -6,6 +6,8 @@ import pika
 
 from helpflow.config import get_settings
 
+INVALID_QUEUE = "helpflow.notifications.invalid"
+
 EXCHANGE = "helpflow.events"
 NOTIFICATION_QUEUE = "helpflow.notifications"
 
@@ -22,6 +24,7 @@ def connect() -> pika.BlockingConnection:
 def declare_topology(channel: pika.channel.Channel) -> None:
     channel.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
     channel.queue_declare(queue=NOTIFICATION_QUEUE, durable=True)
+    channel.queue_declare(queue=INVALID_QUEUE, durable=True)
     channel.queue_bind(queue=NOTIFICATION_QUEUE, exchange=EXCHANGE, routing_key="ticket.*")
 
 

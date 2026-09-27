@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from helpflow.config import get_settings
 from helpflow.db import SessionLocal
 from helpflow.models import User, UserRole
-from helpflow.security import hash_password, verify_password
+from helpflow.security import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +29,6 @@ def _upsert_staff(
                 )
             )
             return
-        user.full_name = full_name
-        user.role = role
-        user.is_active = True
-        if not verify_password(password, user.password_hash):
-            user.password_hash = hash_password(password)
 
 
 def seed_database() -> None:
@@ -41,16 +36,16 @@ def seed_database() -> None:
     _upsert_staff(
         email=str(settings.admin_email),
         password=settings.admin_password.get_secret_value(),
-        full_name="HelpFlow Administrator",
+        full_name="Администратор HelpFlow",
         role=UserRole.ADMIN,
     )
     _upsert_staff(
         email=str(settings.operator_email),
         password=settings.operator_password.get_secret_value(),
-        full_name="HelpFlow Operator",
+        full_name="Оператор HelpFlow",
         role=UserRole.OPERATOR,
     )
-    logger.info("Seed completed")
+    logger.info("Демонстрационные учётные записи подготовлены")
 
 
 if __name__ == "__main__":

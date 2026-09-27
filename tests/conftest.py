@@ -14,10 +14,13 @@ from helpflow.seed import seed_database
 
 @pytest.fixture(scope="session", autouse=True)
 def reset_database() -> Generator[None, None, None]:
+    if engine.url.database != "helpflow_test":
+        raise RuntimeError("Тесты разрешены только в БД helpflow_test")
     with engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE TABLE notification_deliveries, outbox_events, ticket_history, "
+                "TRUNCATE TABLE telegram_links, telegram_receipts, notification_deliveries, "
+                "outbox_events, ticket_history, "
                 "comments, tickets, users RESTART IDENTITY CASCADE"
             )
         )
