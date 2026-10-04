@@ -1,8 +1,18 @@
+# ruff: noqa: E402
+import pytest
+
+from helpflow.test_safety import UnsafeTestEnvironment, ensure_test_environment
+
+# Проверяем окружение раньше settings/engine и регистрации любых fixtures.
+try:
+    ensure_test_environment()
+except UnsafeTestEnvironment as exc:
+    raise pytest.UsageError(str(exc)) from None
+
 from collections.abc import Callable, Generator
 from typing import Any
 from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 

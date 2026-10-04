@@ -30,4 +30,5 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY tests ./tests
 COPY scripts ./scripts
+ENTRYPOINT ["./scripts/test-entrypoint.sh"]
 CMD ["pytest"]

@@ -17,7 +17,10 @@ jobs:
       - run: uv run ruff check .
       - run: uv run mypy src
       - run: docker compose config --quiet
+      - run: uv run pytest --noconftest -p no:cacheprovider tests/test_fixture_safety.py
       - run: docker compose --profile test build test
+      - name: Проверка защиты тестового образа
+        run: uv run pytest -q scripts/test_test_entrypoint.py
       - run: docker compose --profile test run --rm test
       - run: docker compose --profile test run --rm test python scripts/check_migration.py
       - run: docker compose up --build -d --wait --wait-timeout 180 api outbox-publisher notification-worker

@@ -125,6 +125,7 @@ services:
       target: test
     profiles: ["test"]
     environment:
+      TESTING: "true"
       HELPFLOW_DATABASE_URL: postgresql+psycopg://helpflow:helpflow@database-test:5432/helpflow_test
       HELPFLOW_RABBITMQ_URL: amqp://helpflow:helpflow@rabbitmq-test:5672/%2F
       HELPFLOW_JWT_SECRET: test-helpflow-secret-at-least-32-bytes-long
