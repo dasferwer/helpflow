@@ -66,13 +66,19 @@ def _send_telegram(chat_id: str, message: str) -> None:
             result = {"ok": False, "error_code": exc.code}
     except (OSError, ValueError) as exc:
         raise DeliveryError("transport_error") from exc
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or type(result.get("ok")) is not bool:
         raise DeliveryError("invalid_response")
-    if result.get("ok") is not True:
-        code = result.get("error_code", 500)
+    if result["ok"] is True:
+        if not isinstance(result.get("result"), dict):
+            raise DeliveryError("invalid_response")
+    else:
+        code = result.get("error_code")
+        # В журнал попадает только численный код, а не произвольный ответ провайдера.
+        if type(code) is not int or not 100 <= code <= 599:
+            raise DeliveryError("invalid_response")
         parameters = result.get("parameters") or {}
         retry_after = parameters.get("retry_after", 0) if isinstance(parameters, dict) else 0
-        if not isinstance(retry_after, int):
+        if type(retry_after) is not int:
             retry_after = 0
         raise DeliveryError(
             f"telegram_{code}",

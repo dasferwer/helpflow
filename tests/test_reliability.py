@@ -14,6 +14,7 @@ from helpflow.models import (
     TelegramLink,
     Ticket,
     TicketHistory,
+    User,
 )
 from helpflow.worker import notification as worker
 
@@ -408,6 +409,31 @@ def test_obsolete_recipient_is_not_contacted(event, register_client, monkeypatch
     with SessionLocal() as db:
         job = db.scalar(select(NotificationDelivery))
         assert job.status == "dead" and job.error == "recipient_changed"
+
+
+def test_verified_chat_rebound_after_enqueue_is_not_contacted(event, register_client, monkeypatch):
+    owner = register_client()
+    with SessionLocal.begin() as db:
+        user = db.get(User, UUID(owner["id"]))
+        user.telegram_chat_id = "123456"
+        user.telegram_verified_at = datetime.now(UTC)
+        record = db.get(OutboxEvent, UUID(event["event_id"]))
+        record.event_type = "ticket.status_changed"
+        record.payload = {"client_id": owner["id"], "client_chat_id": "123456", "ticket_number": 42}
+    event["event_type"] = "ticket.status_changed"
+    worker.process_event(event)
+    with SessionLocal.begin() as db:
+        user = db.get(User, UUID(owner["id"]))
+        user.telegram_chat_id = "234567"
+        user.telegram_verified_at = datetime.now(UTC)
+    calls = []
+    monkeypatch.setattr(worker, "_send_telegram", lambda chat, message: calls.append(chat))
+    assert worker.deliver_one()
+    assert calls == []
+    with SessionLocal() as db:
+        job = db.scalar(select(NotificationDelivery))
+        assert job.status == "dead" and job.error == "recipient_changed"
+        assert job.recipient == "123456"
 
 
 def test_chat_cannot_be_taken_by_another_account(client, register_client):

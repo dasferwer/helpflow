@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-10-09",
+  "tests": 83,
+  "environment": "изолированные PostgreSQL17/RabbitMQ4 Docker",
+  "telegram": "локальный urllib stub, настоящие сообщения не отправлялись",
+  "red": "9 отрицательных контрактных примеров воспроизвели неверную обработку; подробный log во внешнем отчёте",
+  "checks": [
+    "malformed JSON shape",
+    "HTTP/JSON429 and bounded Retry-After",
+    "permanent400403404",
+    "stable safe error codes",
+    "verified chat changed after enqueue",
+    "existing DB and broker suite"
+  ]
+}
